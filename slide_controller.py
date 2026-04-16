@@ -1,4 +1,6 @@
-import pyautogui
+import time
+import win32con
+import win32gui
 
 
 class SlideController:
@@ -21,6 +23,7 @@ class SlideController:
     def __init__(self):
         self._ppt_app = None        # win32com Application object
         self._presentation = None   # active Presentation object
+        self._shell = None          # WScript.Shell for SendKeys
         self._using_fallback = False
 
     def connect(self) -> bool:
@@ -32,46 +35,66 @@ class SlideController:
             import win32com.client
             self._ppt_app = win32com.client.GetActiveObject("PowerPoint.Application")
             self._presentation = self._ppt_app.ActivePresentation
+            self._shell = win32com.client.Dispatch("WScript.Shell")
             self._using_fallback = False
             total = self._presentation.Slides.Count
             print(f"[SlideController] Attached to PowerPoint — {total} slides")
             return True
         except Exception as e:
+            import win32com.client
+            self._shell = win32com.client.Dispatch("WScript.Shell")
             self._using_fallback = True
             print(f"[SlideController] Could not attach to PowerPoint ({e})")
-            print("[SlideController] Falling back to pyautogui (arrow keys)")
+            print("[SlideController] Falling back to WScript.Shell SendKeys")
             return False
 
+    def _send_key(self, key: str) -> bool:
+        """
+        Activate PowerPoint via WScript.Shell.AppActivate (brings it to
+        foreground by title) then inject a real keystroke with SendKeys.
+        This is more reliable than SetForegroundWindow + PostMessage because
+        WScript handles the focus transfer internally.
+        """
+        if not self._shell:
+            print("[SlideController] Shell not initialised — was connect() called?")
+            return False
+        activated = self._shell.AppActivate("PowerPoint")
+        if not activated:
+            print("[SlideController] AppActivate could not find a PowerPoint window.")
+            return False
+        time.sleep(0.05)   # brief pause for focus transfer to complete
+        self._shell.SendKeys(key)
+        return True
+
+    def _get_show_view(self):
+        """
+        Returns the active SlideShowView from the app-level SlideShowWindows
+        collection. More reliable than going through the presentation object,
+        which can hold a stale reference if the show started after connect().
+        Raises if no slide show is currently running.
+        """
+        if self._ppt_app.SlideShowWindows.Count == 0:
+            raise RuntimeError("No slide show is running — press F5 in PowerPoint first.")
+        return self._ppt_app.SlideShowWindows(1).View
+
     def advance(self) -> None:
-        """Advance to the next slide."""
-        if self._using_fallback:
-            pyautogui.press("right")
-            return
-        try:
-            view = self._presentation.SlideShowWindow.View
-            view.Next()
-        except Exception as e:
-            print(f"[SlideController] advance() failed ({e}), retrying via pyautogui")
-            pyautogui.press("right")
+        """
+        Advance to the next slide. Uses WScript.Shell.SendKeys so transitions
+        and click animations play normally. COM view.Next() is intentionally
+        avoided — it skips animations entirely.
+        """
+        self._send_key("{RIGHT}")
 
     def go_back(self) -> None:
-        """Go back to the previous slide."""
-        if self._using_fallback:
-            pyautogui.press("left")
-            return
-        try:
-            view = self._presentation.SlideShowWindow.View
-            view.Previous()
-        except Exception as e:
-            print(f"[SlideController] go_back() failed ({e}), retrying via pyautogui")
-            pyautogui.press("left")
+        """Go back one slide."""
+        self._send_key("{LEFT}")
 
     def current_slide(self) -> int:
         """Return the 1-indexed current slide number. Returns -1 if unavailable."""
         if self._using_fallback:
             return -1
         try:
-            return self._presentation.SlideShowWindow.View.CurrentShowPosition
+            return self._get_show_view().CurrentShowPosition
         except Exception:
             return -1
 
