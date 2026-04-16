@@ -56,3 +56,6 @@ Thumbs.db
 
 # Debug file:
 debug_ppt.py
+
+# Testing data:
+*.manifest.json

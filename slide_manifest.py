@@ -46,18 +46,12 @@ def extract_manifest(pptx_path: str) -> list[dict]:
             if not text:
                 continue
 
-            # Identify the title placeholder by placeholder type
-            if shape.shape_type == 19:  # MSO_SHAPE_TYPE.PLACEHOLDER
-                pass  # handled below via placeholder_format
-
-            if hasattr(shape, "placeholder_format") and shape.placeholder_format is not None:
+            if shape.is_placeholder:
                 ph_idx = shape.placeholder_format.idx
-                if ph_idx == 0:          # idx 0 = title
+                if ph_idx == 0:      # idx 0 = title
                     title = text
                     continue
-                elif ph_idx == 1:        # idx 1 = body / content
-                    body_parts.append(text)
-                    continue
+                # all other placeholder types fall through to body
 
             body_parts.append(text)
 
