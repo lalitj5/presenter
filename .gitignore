@@ -53,3 +53,6 @@ Thumbs.db
 
 # SQLite
 *.sqlite3
+
+# Debug file:
+debug_ppt.py
