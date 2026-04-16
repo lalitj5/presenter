@@ -1,0 +1,20 @@
+audio:
+  sample_rate: 16000        # Hz — whisper expects 16kHz
+  chunk_duration: 0.5       # seconds per raw audio chunk pushed to queue
+  channels: 1               # mono
+
+transcription:
+  model: "base.en"          # faster-whisper model: tiny.en / base.en / small.en / medium.en
+  device: "cpu"             # "cuda" if GPU available — speeds up transcription significantly
+  compute_type: "int8"      # int8 = fast CPU inference; float16 for GPU
+  buffer_seconds: 2.0       # accumulate this many seconds of audio before transcribing
+                            # lower = less latency, worse accuracy; 2.0 is a good starting point
+
+presentation:
+  type: "powerpoint"        # "powerpoint" or "google_slides" (Phase 3+)
+  lockout_seconds: 8        # minimum seconds between any two auto-advances (Phase 2+)
+
+semantic:
+  pause_threshold: 1.2      # seconds of silence before triggering an LLM check (Phase 2)
+  context_window: 20        # seconds of transcript history to include in each LLM call
+  confidence_threshold: 0.80  # minimum LLM confidence score required to advance
