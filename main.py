@@ -1,8 +1,9 @@
 """
-auto-present — Phase 2
+auto-present — Phase 3
 
 Pipeline: microphone → faster-whisper → transcript buffer
-          → semantic detector (Claude) → auto-advance slides
+              ├─ semantic detector (Claude)  ─┐
+              └─ prosodic detector (pitch)  ─┴─ fusion → auto-advance
 
 Manual controls still active:
   →  next slide   ←  prev slide   q  quit
@@ -24,6 +25,7 @@ import keyboard
 import yaml
 
 from audio_capture import AudioCapture
+from prosodic_detector import ProsodicDetector
 from semantic_detector import SemanticDetector
 from slide_controller import SlideController
 from transcript_buffer import TranscriptBuffer
@@ -41,9 +43,15 @@ async def transcription_loop(
     capture: AudioCapture,
     transcriber: Transcriber,
     buffer: TranscriptBuffer,
+    prosodic: ProsodicDetector,
+    prosodic_signal_box: list,   # mutable box: [ProsodicSignal | None]
     stop_event: asyncio.Event,
 ) -> None:
-    """Pulls audio chunks, transcribes, appends to buffer, prints to terminal."""
+    """
+    Pulls audio chunks, feeds them to:
+      - Transcriber (buffered, slower) → transcript buffer
+      - ProsodicDetector (every chunk, fast) → prosodic_signal_box
+    """
     loop = asyncio.get_event_loop()
 
     while not stop_event.is_set():
@@ -51,6 +59,16 @@ async def transcription_loop(
         if chunk is None:
             continue
 
+        # Prosodic analysis runs on every raw chunk — no buffering needed
+        prosodic_signal = await loop.run_in_executor(None, prosodic.feed, chunk)
+        if prosodic_signal is not None:
+            prosodic_signal_box[0] = prosodic_signal
+            print(
+                f"[Prosodic] signal confidence={prosodic_signal.confidence:.2f} "
+                f"— {prosodic_signal.reason}"
+            )
+
+        # Transcription runs on buffered chunks
         segment = await loop.run_in_executor(None, transcriber.feed, chunk)
         if segment is None:
             continue
@@ -65,26 +83,35 @@ async def transcription_loop(
 async def semantic_loop(
     buffer: TranscriptBuffer,
     detector: SemanticDetector,
+    prosodic_signal_box: list,   # [ProsodicSignal | None] written by transcription_loop
     controller: SlideController,
     config: dict,
     stop_event: asyncio.Event,
 ) -> None:
     """
-    Watches the transcript buffer. When a pause is detected, fires a Claude
-    call with the recent transcript window. If confidence exceeds the threshold
-    and the lockout has expired, advances the slide automatically.
+    Fusion loop: fires Claude on pause detection, then combines semantic
+    confidence with the latest prosodic signal to decide whether to advance.
+
+    Fusion rules:
+      - Advance if semantic_confidence >= HIGH_THRESHOLD (0.88) alone
+      - Advance if semantic_confidence >= MID_THRESHOLD (0.65) AND prosodic_confidence >= 0.35
+      - Never advance within lockout_seconds of the last advance
     """
     sem_cfg = config["semantic"]
     pres_cfg = config["presentation"]
 
     pause_threshold: float = sem_cfg["pause_threshold"]
     context_window: float = sem_cfg["context_window"]
-    confidence_threshold: float = sem_cfg["confidence_threshold"]
+    confidence_threshold: float = sem_cfg["confidence_threshold"]   # base threshold
     lockout_seconds: float = pres_cfg["lockout_seconds"]
+
+    HIGH_THRESHOLD = confidence_threshold          # semantic alone sufficient
+    MID_THRESHOLD = confidence_threshold - 0.15    # semantic + prosodic together sufficient
+    PROSODIC_MIN = 0.35                            # minimum prosodic confidence to count
 
     last_advance_time: float = 0.0
     last_check_time: float = 0.0
-    min_check_interval: float = 2.0   # don't fire LLM calls faster than every 2s
+    min_check_interval: float = 2.0
 
     loop = asyncio.get_event_loop()
 
@@ -93,7 +120,6 @@ async def semantic_loop(
 
         now = time.time()
 
-        # Only trigger when there's a real pause and enough time since last check
         if not buffer.is_paused(pause_threshold):
             continue
         if now - last_check_time < min_check_interval:
@@ -107,26 +133,38 @@ async def semantic_loop(
 
         current_slide = controller.current_slide()
         if current_slide <= 0:
-            continue  # couldn't read slide position
+            continue
 
         last_check_time = now
         print(f"[Semantic] Checking slide {current_slide} — '{transcript_window[-60:]}'...")
 
-        # Run blocking API call in thread so we don't stall the event loop
         decision = await loop.run_in_executor(
             None, detector.check, transcript_window, current_slide
         )
-
         if decision is None:
             continue
 
+        # Read and clear the latest prosodic signal
+        prosodic = prosodic_signal_box[0]
+        prosodic_signal_box[0] = None
+
+        prosodic_conf = prosodic.confidence if prosodic is not None else 0.0
+        sem_conf = decision.confidence
+
         print(
-            f"[Semantic] advance={decision.advance} "
-            f"confidence={decision.confidence:.2f} — {decision.reason}"
+            f"[Fusion] semantic={sem_conf:.2f} prosodic={prosodic_conf:.2f} "
+            f"advance={decision.advance} — {decision.reason}"
         )
 
-        if decision.advance and decision.confidence >= confidence_threshold:
-            print(f"[Semantic] ✓ Advancing {decision.slide_from} → {decision.slide_to}")
+        should_advance = (
+            decision.advance and (
+                sem_conf >= HIGH_THRESHOLD
+                or (sem_conf >= MID_THRESHOLD and prosodic_conf >= PROSODIC_MIN)
+            )
+        )
+
+        if should_advance:
+            print(f"[Fusion] ✓ Advancing {decision.slide_from} → {decision.slide_to}")
             controller.advance()
             last_advance_time = time.time()
 
@@ -210,14 +248,19 @@ async def main() -> None:
         model=config["semantic"]["model"],
     )
 
+    # --- Prosodic detector ---
+    prosodic = ProsodicDetector(sample_rate=config["audio"]["sample_rate"])
+    prosodic_signal_box = [None]   # shared mutable cell between loops
+    print(f"[main] Prosodic calibration: speak normally for ~30s to calibrate pitch baseline.")
+
     stop_event = asyncio.Event()
     capture.start()
     print("[main] Listening... speak into your microphone.\n")
 
     try:
         await asyncio.gather(
-            transcription_loop(capture, transcriber, buffer, stop_event),
-            semantic_loop(buffer, detector, controller, config, stop_event),
+            transcription_loop(capture, transcriber, buffer, prosodic, prosodic_signal_box, stop_event),
+            semantic_loop(buffer, detector, prosodic_signal_box, controller, config, stop_event),
             key_listener(controller, stop_event),
         )
     except asyncio.CancelledError:
