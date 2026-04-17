@@ -24,7 +24,7 @@ from slide_manifest import load_manifest
 
 from dotenv import load_dotenv
 load_dotenv()
-api_key = os.getenv("ANTHROPIC_API_KEY")
+api_key = os.getenv("ANTHROPIC_API_KEY") # works
 
 @dataclass
 class SlideDecision:
