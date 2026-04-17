@@ -12,9 +12,11 @@ transcription:
 
 presentation:
   type: "powerpoint"        # "powerpoint" or "google_slides" (Phase 3+)
-  lockout_seconds: 8        # minimum seconds between any two auto-advances (Phase 2+)
+  lockout_seconds: 8        # minimum seconds between any two auto-advances
+  manifest_path: "Presentation1.manifest.json"         # path to .manifest.json — set this before running
 
 semantic:
-  pause_threshold: 1.2      # seconds of silence before triggering an LLM check (Phase 2)
+  pause_threshold: 1.2      # seconds of silence before triggering an LLM check
   context_window: 20        # seconds of transcript history to include in each LLM call
   confidence_threshold: 0.80  # minimum LLM confidence score required to advance
+  model: "claude-sonnet-4-6"  # Claude model to use
