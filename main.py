@@ -19,12 +19,12 @@ Setup:
 import asyncio
 import os
 import time
-from datetime import datetime
 
 import keyboard
 import yaml
 
 from audio_capture import AudioCapture
+from display import LiveDisplay
 from prosodic_detector import ProsodicDetector
 from semantic_detector import SemanticDetector
 from slide_controller import SlideController
@@ -44,14 +44,10 @@ async def transcription_loop(
     transcriber: Transcriber,
     buffer: TranscriptBuffer,
     prosodic: ProsodicDetector,
-    prosodic_signal_box: list,   # mutable box: [ProsodicSignal | None]
+    prosodic_signal_box: list,
+    display: LiveDisplay,
     stop_event: asyncio.Event,
 ) -> None:
-    """
-    Pulls audio chunks, feeds them to:
-      - Transcriber (buffered, slower) → transcript buffer
-      - ProsodicDetector (every chunk, fast) → prosodic_signal_box
-    """
     loop = asyncio.get_event_loop()
 
     while not stop_event.is_set():
@@ -59,16 +55,16 @@ async def transcription_loop(
         if chunk is None:
             continue
 
-        # Prosodic analysis runs on every raw chunk — no buffering needed
+        # Prosodic analysis — runs on every raw chunk
         prosodic_signal = await loop.run_in_executor(None, prosodic.feed, chunk)
+        display.update_pitch(prosodic.last_pitch)
+
         if prosodic_signal is not None:
             prosodic_signal_box[0] = prosodic_signal
-            print(
-                f"[Prosodic] signal confidence={prosodic_signal.confidence:.2f} "
-                f"— {prosodic_signal.reason}"
-            )
+            if prosodic_signal.triggered:
+                display.mark_prosodic_trigger()
 
-        # Transcription runs on buffered chunks
+        # Transcription — runs on buffered chunks
         segment = await loop.run_in_executor(None, transcriber.feed, chunk)
         if segment is None:
             continue
@@ -76,15 +72,15 @@ async def transcription_loop(
         buffer.append(segment)
 
         if not segment.is_silence:
-            ts = datetime.fromtimestamp(segment.timestamp).strftime("%H:%M:%S")
-            print(f"[{ts}] {segment.text}")
+            display.update_transcript(segment.text)
 
 
 async def semantic_loop(
     buffer: TranscriptBuffer,
     detector: SemanticDetector,
-    prosodic_signal_box: list,   # [ProsodicSignal | None] written by transcription_loop
+    prosodic_signal_box: list,
     controller: SlideController,
+    display: LiveDisplay,
     config: dict,
     stop_event: asyncio.Event,
 ) -> None:
@@ -105,9 +101,8 @@ async def semantic_loop(
     confidence_threshold: float = sem_cfg["confidence_threshold"]   # base threshold
     lockout_seconds: float = pres_cfg["lockout_seconds"]
 
-    HIGH_THRESHOLD = confidence_threshold          # semantic alone sufficient
-    MID_THRESHOLD = confidence_threshold - 0.15    # semantic + prosodic together sufficient
-    PROSODIC_MIN = 0.35                            # minimum prosodic confidence to count
+    HIGH_THRESHOLD = confidence_threshold          # semantic alone is sufficient
+    MID_THRESHOLD = confidence_threshold - 0.15    # semantic + prosodic=1 together sufficient
 
     last_advance_time: float = 0.0
     last_check_time: float = 0.0
@@ -144,29 +139,36 @@ async def semantic_loop(
         if decision is None:
             continue
 
-        # Read and clear the latest prosodic signal
+        # Read prosodic signal — only count it if it fired within the last 8 seconds.
+        # Don't clear it; it stays until overwritten by a newer signal.
         prosodic = prosodic_signal_box[0]
-        prosodic_signal_box[0] = None
+        if prosodic is not None and (time.time() - prosodic.timestamp) > 8.0:
+            prosodic = None  # too stale to be relevant to this pause
 
-        prosodic_conf = prosodic.confidence if prosodic is not None else 0.0
+        prosodic_triggered = prosodic.triggered if prosodic is not None else False
         sem_conf = decision.confidence
 
-        print(
-            f"[Fusion] semantic={sem_conf:.2f} prosodic={prosodic_conf:.2f} "
-            f"advance={decision.advance} — {decision.reason}"
+        display.update_status(
+            current_slide,
+            controller.total_slides(),
+            f"semantic={sem_conf:.2f} prosodic={'1' if prosodic_triggered else '0'}",
         )
 
         should_advance = (
             decision.advance and (
                 sem_conf >= HIGH_THRESHOLD
-                or (sem_conf >= MID_THRESHOLD and prosodic_conf >= PROSODIC_MIN)
+                or (sem_conf >= MID_THRESHOLD and prosodic_triggered)
             )
         )
 
         if should_advance:
-            print(f"[Fusion] ✓ Advancing {decision.slide_from} → {decision.slide_to}")
             controller.advance()
             last_advance_time = time.time()
+            display.update_status(
+                decision.slide_to,
+                controller.total_slides(),
+                f"↑ advanced ({sem_conf:.2f})",
+            )
 
 
 async def key_listener(
@@ -250,23 +252,26 @@ async def main() -> None:
 
     # --- Prosodic detector ---
     prosodic = ProsodicDetector(sample_rate=config["audio"]["sample_rate"])
-    prosodic_signal_box = [None]   # shared mutable cell between loops
-    print(f"[main] Prosodic calibration: speak normally for ~30s to calibrate pitch baseline.")
+    prosodic_signal_box = [None]
+
+    # --- Live display ---
+    display = LiveDisplay()
+    display.start()
 
     stop_event = asyncio.Event()
     capture.start()
-    print("[main] Listening... speak into your microphone.\n")
 
     try:
         await asyncio.gather(
-            transcription_loop(capture, transcriber, buffer, prosodic, prosodic_signal_box, stop_event),
-            semantic_loop(buffer, detector, prosodic_signal_box, controller, config, stop_event),
+            transcription_loop(capture, transcriber, buffer, prosodic, prosodic_signal_box, display, stop_event),
+            semantic_loop(buffer, detector, prosodic_signal_box, controller, display, config, stop_event),
             key_listener(controller, stop_event),
         )
     except asyncio.CancelledError:
         pass
     finally:
         capture.stop()
+        display.stop()
         final = transcriber.flush()
         if final and not final.is_silence:
             print(f"[final] {final.text}")

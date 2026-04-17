@@ -18,5 +18,5 @@ presentation:
 semantic:
   pause_threshold: 1.2      # seconds of silence before triggering an LLM check
   context_window: 20        # seconds of transcript history to include in each LLM call
-  confidence_threshold: 0.80  # minimum LLM confidence score required to advance
+  confidence_threshold: 0.70  # minimum LLM confidence score required to advance
   model: "claude-sonnet-4-6"  # Claude model to use

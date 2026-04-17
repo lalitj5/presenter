@@ -18,4 +18,8 @@ librosa>=0.10.0
 # Utilities
 pyyaml>=6.0
 keyboard>=0.13.5
+
+# Live display
+rich>=13.0.0
+plotext>=5.2.0
 python-dotenv>=1.0.0
